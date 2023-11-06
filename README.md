@@ -1,2 +1,2 @@
 # PlasticBag
-Just a Plastic Bag
+Just a Plastic Bag Stimulator
