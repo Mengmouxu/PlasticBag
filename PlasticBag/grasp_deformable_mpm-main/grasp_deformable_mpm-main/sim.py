@@ -341,8 +341,9 @@ class MpmLagSim:
         self.inv_dx = self.n_grids
         self.origin = origin
         self.bound = 30
-        self.gravity = 20
+        self.gravity = 1
         self.bending_p = 0.05
+        self.lift_state = 0
         self.clear_bodies()
 
         # TODO: align these parameters in the future
@@ -351,7 +352,7 @@ class MpmLagSim:
         self.rp_rho = 10
         self.rp_mass = self.p_vol * self.rp_rho
 
-        E, nu = 5e1, 0.2
+        E, nu = 1e1, 0.49
         self.mu, self.lam = E / (2 * (1 + nu)), E * \
             nu / ((1 + nu) * (1 - 2 * nu))
         self.eps = 1e-6
@@ -442,7 +443,7 @@ class MpmLagSim:
     @ti.kernel
     def init_field(self):
         for i in ti.ndrange(self.n_soft_verts):
-            self.v_soft[i] = ti.Vector.zero(T, 3)
+            self.v_soft[i] = ti.Vector([0,0,0],T)
             # self.v_rigid[i] = ti.Vector.zero(T, 3)
             self.C_soft[i] = ti.Matrix.zero(T, 3, 3)
 
@@ -486,6 +487,16 @@ class MpmLagSim:
         self.grid_op()
         self.G2P()
 
+    def substep_1(self):
+        self.grid_m.fill(0)
+        self.grid_v.fill(0)
+        self.energy_soft[None] = 0
+        with ti.ad.Tape(self.energy_soft):
+            self.compute_energy_soft()  # TODO
+        self.P2G()
+        self.grid_op()
+        self.G2P_1()
+
     @ti.kernel
     def P2G(self):
         for p in self.x_soft:
@@ -528,7 +539,9 @@ class MpmLagSim:
                 if i > self.n_grids - self.bound and self.grid_v[i, j, k].x > 0:
                     self.grid_v[i, j, k].x *= -0.5
                 if j < self.bound and self.grid_v[i, j, k].y < 0:
-                    self.grid_v[i, j, k].y *= -0.5
+                    self.grid_v[i, j, k].y *= -0.001
+                    self.grid_v[i, j, k].x *= 0.99
+                    self.grid_v[i, j, k].z *= 0.99
                 if j > self.n_grids - self.bound and self.grid_v[i, j,k].y > 0:
                     self.grid_v[i, j, k].y *= -0.5
                 if k < self.bound and self.grid_v[i, j, k].z < 0:
@@ -559,6 +572,35 @@ class MpmLagSim:
         # for p in self.x_rigid:
         #     self.x_rigid[p] += self.dt * self.v_rigid[p]
 
+    @ti.kernel
+    def G2P_1(self):
+        for p in self.x_soft:
+            base = ti.cast(self.x_soft[p] * self.inv_dx - 0.5, ti.i32)
+            fx = self.x_soft[p] * self.inv_dx - float(base)
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0)
+                 ** 2, 0.5 * (fx - 0.5) ** 2]
+            new_v = ti.Vector.zero(T, 3)
+            new_C = ti.Matrix.zero(T, 3, 3)
+
+            for i, j, k in ti.static(ti.ndrange(3, 3, 3)):
+                dpos = ti.Vector([i, j, k]).cast(float) - fx
+                g_v = self.grid_v[base + ti.Vector([i, j, k])]
+                weight = w[i][0] * w[j][1] * w[k][2]
+                new_v += weight * g_v
+                new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
+
+            self.v_soft[p], self.C_soft[p] = new_v, new_C
+            self.x_soft[p] += self.dt * self.v_soft[p]  # advection
+        lift_up = [0.0,0.3,0.0]
+        self.v_soft[100] += lift_up
+        self.v_soft[90] += lift_up
+        self.v_soft[91] += lift_up
+        self.v_soft[92] += lift_up
+        self.v_soft[103] += lift_up
+        self.v_soft[104] += lift_up
+
+
+    
     # reference: https://github.com/zenustech/zeno/blob/master/projects/CuLagrange/fem/Generation.cpp
     @ti.kernel
     def compute_energy_soft(self):
@@ -595,7 +637,7 @@ class MpmLagSim:
             self.energy_soft[None] += (theta - self.rest_bending_soft[bi]) ** 2 * area * 0.3 * self.mu
     
     def plastic_yield_bending(self, theta):
-        yield_angle = 0.5  # to be adjusted
+        yield_angle = 0.001  # to be adjusted
         if abs(theta) > yield_angle:
             theta_plastic = yield_angle if theta > 0 else -yield_angle
         else:
@@ -636,7 +678,7 @@ class MpmLagSim:
         self.scene.point_light(pos=(0.5, 1.5, 1.5), color=(1, 1, 1))
 
         self.scene.particles(self.x_soft, color=(
-            0.68, 0.26, 0.19), radius=0.005)
+            0.68, 0.26, 0.19), radius=0.0005)
         # self.scene.particles(self.x_rigid, color=(
         #     0.19, 0.26, 0.68), radius=0.002)
 
